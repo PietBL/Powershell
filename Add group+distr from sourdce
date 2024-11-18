@@ -1,0 +1,123 @@
+# Controleer of Exchange Online PowerShell-module is geïnstalleerd
+if (-not (Get-Module -ListAvailable -Name ExchangeOnlineManagement)) {
+    Write-Host "De Exchange Online PowerShell-module is niet geïnstalleerd." -ForegroundColor Yellow
+    $installExchangeModule = Read-Host "Wil je de Exchange Online-module nu installeren? (Ja/Nee)"
+    if ($installExchangeModule -eq "Ja") {
+        try {
+            Write-Host "Installeren van de Exchange Online PowerShell-module..." -ForegroundColor Green
+            Install-Module -Name ExchangeOnlineManagement -Force -Scope CurrentUser
+            Write-Host "De Exchange Online-module is succesvol geïnstalleerd." -ForegroundColor Green
+        } catch {
+            Write-Host "Fout bij het installeren van de Exchange Online-module. Controleer je netwerkverbinding of machtigingen." -ForegroundColor Red
+            Write-Host "Foutmelding: $_"
+            exit
+        }
+    } else {
+        Write-Host "De Exchange Online-module is vereist om distributiegroepen te beheren. Het script wordt beëindigd." -ForegroundColor Red
+        exit
+    }
+} else {
+    Write-Host "De Exchange Online PowerShell-module is al geïnstalleerd." -ForegroundColor Green
+}
+
+# Stap 1: Verbind met Azure AD
+Connect-AzureAD
+
+# Stap 2: Vraag invoer voor de brongebruiker (voorbeeldgebruiker) en de nieuwe medewerker
+$sourceUserUPN = Read-Host "Voer de UPN in van de voorbeeldgebruiker (bijv. voorbeeld.gebruiker@domein.com)"
+$newUserUPN = Read-Host "Voer de UPN in van de nieuwe medewerker (bijv. nieuwe.medewerker@domein.com)"
+
+# Haal de brongebruiker op
+$sourceUser = Get-AzureADUser -ObjectId $sourceUserUPN
+$sourceUserId = $sourceUser.ObjectId
+Write-Host "Brongebruiker opgehaald: $($sourceUser.DisplayName), ID: $sourceUserId"
+
+# Haal de nieuwe gebruiker op
+$newUser = Get-AzureADUser -ObjectId $newUserUPN
+$newUserId = $newUser.ObjectId
+Write-Host "Nieuwe gebruiker opgehaald: $($newUser.DisplayName), ID: $newUserId"
+
+# Stap 3: Haal de groepen op waarvan de brongebruiker lid is
+$sourceUserGroups = Get-AzureADUserMembership -ObjectId $sourceUserId | Where-Object {
+    $_.ObjectType -eq "Group"
+}
+
+# Log het aantal opgehaalde groepen
+Write-Host "Aantal opgehaalde groepen: $($sourceUserGroups.Count)"
+foreach ($group in $sourceUserGroups) {
+    Write-Host "Groep gevonden: $($group.DisplayName)"
+}
+
+# Stap 4: Voeg de nieuwe gebruiker toe aan de niet-dynamische groepen van de brongebruiker
+foreach ($group in $sourceUserGroups) {
+    # Haal de details van de groep op
+    $groupDetails = Get-AzureADGroup -ObjectId $group.ObjectId
+
+    # Controleer of de groep dynamisch is
+    if ($groupDetails.GroupTypes -notcontains "DynamicMembership") {
+        # Controleer of de groep een distributiegroep is
+        $isDistributionGroup = $groupDetails.MailEnabled -eq $true -and $groupDetails.SecurityEnabled -eq $false
+
+        try {
+            if ($isDistributionGroup) {
+                # Sla distributiegroepen tijdelijk over (afhandelen in de volgende stap)
+                Write-Host "Groep $($groupDetails.DisplayName) is een distributiegroep. Dit wordt later verwerkt."
+            } else {
+                # Niet-dynamische beveiligingsgroep
+                Add-AzureADGroupMember -ObjectId $group.ObjectId -RefObjectId $newUserId
+                Write-Host "Nieuwe gebruiker toegevoegd aan groep: $($groupDetails.DisplayName)"
+            }
+        } catch {
+            Write-Host "Er is een fout opgetreden bij het verwerken van de groep: $($groupDetails.DisplayName)"
+            Write-Host "Foutmelding: $_"
+        }
+    } else {
+        Write-Host "Groep $($groupDetails.DisplayName) is dynamisch en wordt overgeslagen."
+    }
+}
+
+# Stap 5: Controleer of er distributiegroepen zijn en vraag of deze moeten worden toegevoegd
+$distributionGroups = $sourceUserGroups | Where-Object {
+    $groupDetails = Get-AzureADGroup -ObjectId $_.ObjectId
+    $groupDetails.MailEnabled -eq $true -and $groupDetails.SecurityEnabled -eq $false
+}
+
+if ($distributionGroups.Count -gt 0) {
+    Write-Host "`nDe volgende distributiegroepen zijn gevonden:"
+    foreach ($group in $distributionGroups) {
+        Write-Host "- $($group.DisplayName)"
+    }
+
+    $addDistributionGroups = Read-Host "Wil je de nieuwe gebruiker toevoegen aan deze distributiegroepen? (Ja/Nee)"
+    if ($addDistributionGroups -eq "Ja") {
+        # Verbind met Exchange Online om distributiegroepen te beheren
+        try {
+            Write-Host "Verbind met Exchange Online..."
+            Connect-ExchangeOnline -ShowProgress $true
+
+            foreach ($group in $distributionGroups) {
+                try {
+                    # Voeg gebruiker toe aan distributiegroep
+                    Add-DistributionGroupMember -Identity $group.DisplayName -Member $newUserUPN
+                    Write-Host "Nieuwe gebruiker toegevoegd aan distributiegroep: $($group.DisplayName)"
+                } catch {
+                    Write-Host "Fout bij het toevoegen aan distributiegroep: $($group.DisplayName)"
+                    Write-Host "Foutmelding: $_"
+                }
+            }
+        } catch {
+            Write-Host "Er is een fout opgetreden bij het verbinden met Exchange Online."
+            Write-Host "Foutmelding: $_"
+        } finally {
+            # Sluit de Exchange Online-sessie
+            Disconnect-ExchangeOnline -Confirm:$false
+            Write-Host "Exchange Online-sessie beëindigd."
+        }
+    } else {
+        Write-Host "Distributiegroepen worden niet toegevoegd. Script voltooid."
+    }
+} else {
+    Write-Host "Geen distributiegroepen gevonden. Script voltooid."
+}
+
+Write-Host "`nScript volledig afgerond."
