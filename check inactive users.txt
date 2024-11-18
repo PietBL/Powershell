@@ -1,0 +1,21 @@
+# Doel-SKU ID voor Microsoft 365 E5 zonder Teams
+$targetLicense = "6fd2c87f-b296-42f0-b197-1e91e994b900" # E5 zonder Teams License SKU ID
+
+# Dynamische datum voor filtering (vandaag)
+$currentDate = (Get-Date).ToString("yyyy-MM-ddTHH:mm:ssZ") # ISO 8601 formaat
+
+# Haal gebruikers op die inactief zijn sinds de opgegeven datum
+$users = Get-MgUser -Filter "signInActivity/lastSignInDateTime le $currentDate" `
+    -Property "displayName,AccountEnabled,assignedLicenses,signInActivity" `
+    | Select-Object displayName, assignedLicenses, @{Name='LastSignIn'; Expression={$_.signInActivity.lastSignInDateTime}}
+
+# Filter gebruikers met de doel-SKU (E5 zonder Teams)
+$inactiveUsers = $users | Where-Object {
+    $_.assignedLicenses -and ($_.assignedLicenses | ForEach-Object { $_.SkuId -eq $targetLicense })
+} | Select-Object displayName, LastSignIn
+
+# Sorteer gebruikers alfabetisch op naam en toon resultaten
+$inactiveUsers | Sort-Object DisplayName
+
+# Eventueel exporteren naar CSV
+#$inactiveUsers | Sort-Object DisplayName | Export-Csv -Path "InactiveUsers_E5_Without_Teams.csv" -NoTypeInformation -Encoding UTF8
